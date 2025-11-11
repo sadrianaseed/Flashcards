@@ -1,0 +1,568 @@
+
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flashcards: Consciência e Relações Raciais</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f9fb;
+        }
+
+        /* Container que permite o efeito 3D */
+        .flashcard-container {
+            perspective: 1000px;
+            height: 350px; /* Aumentado para acomodar 2 botões e 2 áreas de output */
+        }
+
+        /* O cartão real (frente e verso) */
+        .flashcard-inner {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            text-align: center;
+            transition: transform 0.6s;
+            transform-style: preserve-3d;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            border-radius: 12px;
+        }
+
+        /* Classe para virar o cartão */
+        .is-flipped {
+            transform: rotateY(180deg);
+        }
+
+        /* Frente e Verso do cartão */
+        .flashcard-front, .flashcard-back {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            -webkit-backface-visibility: hidden; /* Oculta a face de trás durante a rotação */
+            backface-visibility: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 1.5rem; 
+            border-radius: 12px;
+            color: white;
+            cursor: pointer;
+            text-align: center;
+            /* Garante renderização de texto suave no verso */
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+        }
+
+        /* Estilo específico para a parte de trás */
+        .flashcard-back {
+            transform: rotateY(180deg);
+            justify-content: flex-start; /* Alinha o conteúdo ao topo para melhor disposição */
+            padding-top: 1rem;
+            overflow-y: auto;
+        }
+        
+        /* Estilos para o texto de output da IA */
+        .gemini-output-box {
+            max-height: 100px;
+            overflow-y: auto;
+            text-align: left !important; /* Sobrescreve o alinhamento central do pai */
+        }
+
+        .icon-size {
+            font-size: 3rem;
+        }
+
+        /* Ajustes responsivos para tamanho de texto em dispositivos móveis */
+        @media (max-width: 640px) {
+            .flashcard-container {
+                height: 380px; /* Aumentado um pouco mais para mobile */
+            }
+            .flashcard-front p {
+                font-size: 0.95rem;
+            }
+            .flashcard-back p {
+                font-size: 0.85rem;
+            }
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8">
+
+    <header class="text-center mb-10">
+        <h1 class="text-3xl sm:text-4xl font-extrabold text-gray-800">30 Flashcards: Identidade, Lutas e Reparação Racial</h1>
+        <p class="text-lg text-gray-600 mt-2">Clique em qualquer cartão para ver a resposta. Use os botões ✨ para gerar exemplos e questões de debate com IA.</p>
+    </header>
+
+    <div id="flashcards-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4 max-w-7xl mx-auto">
+        <!-- Os cartões serão injetados aqui pelo JavaScript -->
+    </div>
+
+    <script>
+        // Variáveis de configuração do Firebase (necessárias para o ambiente Canvas)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : null;
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+        
+        // Chave da API Gemini (mantida vazia para ser injetada pelo ambiente)
+        const apiKey = "";
+        const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`;
+
+        /**
+         * Utility function to perform fetch with exponential backoff.
+         * @param {string} url - The URL to fetch.
+         * @param {Object} options - The fetch options.
+         * @param {number} retries - Current retry count.
+         * @returns {Promise<Response>}
+         */
+        async function fetchWithExponentialBackoff(url, options, retries = 0) {
+            try {
+                const response = await fetch(url, options);
+                if (response.status === 429 && retries < 3) { // Too Many Requests
+                    const delay = Math.pow(2, retries) * 1000;
+                    console.warn(`429 received. Retrying in ${delay}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    return fetchWithExponentialBackoff(url, options, retries + 1);
+                }
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response;
+            } catch (error) {
+                if (retries < 3) {
+                    const delay = Math.pow(2, retries) * 1000;
+                    console.warn(`Fetch error. Retrying in ${delay}ms...`);
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    return fetchWithExponentialBackoff(url, options, retries + 1);
+                }
+                throw error;
+            }
+        }
+
+        /**
+         * Calls the Gemini API to generate a contextually relevant example.
+         * @param {string} topic - The topic of the card.
+         * @param {string} definition - The definition of the concept.
+         * @returns {Promise<string>} - The generated example text.
+         */
+        async function generateExample(topic, definition) {
+            const systemPrompt = "Você é um tutor de Língua Portuguesa e cidadania. Sua tarefa é criar um exemplo conciso e contemporâneo, ou uma analogia clara, que ilustre o conceito fornecido, focando na realidade social brasileira. Use no máximo 4 frases. O tom deve ser informativo e acessível para o nível secundário.";
+            const userQuery = `Conceito: ${topic}. Definição: ${definition}`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+
+            const options = {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            };
+
+            try {
+                const response = await fetchWithExponentialBackoff(API_URL, options);
+                const result = await response.json();
+                
+                const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                if (text) {
+                    return text.trim();
+                } else {
+                    console.error('Gemini API returned no text.', result);
+                    return "Não foi possível gerar um exemplo. Tente novamente.";
+                }
+
+            } catch (error) {
+                console.error('Erro ao chamar a API Gemini:', error);
+                return "Erro de conexão ao gerar o exemplo. Verifique a consola.";
+            }
+        }
+
+        /**
+         * Calls the Gemini API to generate a critical thinking discussion question.
+         * @param {string} topic - The topic of the card.
+         * @param {string} definition - The definition of the concept.
+         * @returns {Promise<string>} - The generated question text.
+         */
+        async function generateDiscussionQuestion(topic, definition) {
+            const systemPrompt = "Você é um professor de Sociologia e Cidadania. Sua tarefa é criar uma pergunta de pensamento crítico, debate ou conexão com a atualidade brasileira com base no conceito fornecido. A pergunta deve ser aberta e desafiadora, adequada para uma discussão em sala de aula de nível secundário/ensino médio. Use no máximo 2 frases.";
+            const userQuery = `Gere uma pergunta para discussão sobre o conceito: ${topic} (${definition})`;
+
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: {
+                    parts: [{ text: systemPrompt }]
+                },
+            };
+            
+            const options = {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            };
+
+            try {
+                const response = await fetchWithExponentialBackoff(API_URL, options);
+                const result = await response.json();
+                
+                const text = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                
+                if (text) {
+                    return text.trim();
+                } else {
+                    console.error('Gemini API returned no text.', result);
+                    return "Não foi possível gerar a pergunta. Tente novamente.";
+                }
+
+            } catch (error) {
+                console.error('Erro ao chamar a API Gemini:', error);
+                return "Erro de conexão ao gerar a pergunta. Verifique a consola.";
+            }
+        }
+
+
+        // Configuração dos cartões com conteúdo, cores e ícones/emojis
+        const flashcardsData = [
+            // --- 1. Racismo Estrutural, Institucional e Ambiental (5 cards) ---
+            {
+                topic: "Racismo Estrutural",
+                question: "O que é 'Racismo Estrutural'?",
+                answer: "É o conjunto de normas, práticas, hábitos e costumes que promovem a desigualdade e a discriminação racial, estando enraizado nas instituições e na sociedade.",
+                emoji: "⚙️",
+                colorClass: "bg-red-600 hover:bg-red-700"
+            },
+            {
+                topic: "Racismo Institucional",
+                question: "Defina 'Racismo Institucional'.",
+                answer: "Falha das instituições públicas e privadas em prover serviços ou oportunidades de forma equitativa, resultando em desvantagem para grupos raciais minoritários.",
+                emoji: "🏢",
+                colorClass: "bg-indigo-600 hover:bg-indigo-700"
+            },
+            {
+                topic: "Racismo Ambiental",
+                question: "O que significa 'Racismo Ambiental'?",
+                answer: "Desigualdade que coloca comunidades minoritárias (muitas vezes negras) em áreas mais expostas a riscos ambientais, como poluição e falta de saneamento.",
+                emoji: "🌍",
+                colorClass: "bg-teal-600 hover:bg-teal-700"
+            },
+            {
+                topic: "Racismo Institucional (Exemplo)",
+                question: "Dê um exemplo prático de Racismo Institucional na segurança pública.",
+                answer: "A abordagem policial seletiva ou desproporcional, que vitimiza e criminaliza injustamente jovens e adultos negros em comparação a outros grupos.",
+                emoji: "🚨",
+                colorClass: "bg-pink-600 hover:bg-pink-700"
+            },
+            {
+                topic: "Racismo Ambiental (Exemplo)",
+                question: "Qual o exemplo mais comum de Racismo Ambiental no Brasil?",
+                answer: "A falta de saneamento básico, coleta de lixo e acesso à água potável em comunidades periféricas e quilombolas, majoritariamente negras.",
+                emoji: "💧",
+                colorClass: "bg-lime-600 hover:bg-lime-700"
+            },
+
+            // --- 2. Pertencimento Racial e Autodeclaração (5 cards) ---
+            {
+                topic: "Pertencimento Racial",
+                question: "O que significa 'Pertencimento Racial'?",
+                answer: "É a identificação individual e coletiva com um grupo racial, influenciada por aspectos históricos, sociais e culturais, fundamental para a construção da identidade.",
+                emoji: "🤝",
+                colorClass: "bg-green-600 hover:bg-green-700"
+            },
+            {
+                topic: "Autodeclaração",
+                question: "Em que consiste a 'Autodeclaração'?",
+                answer: "É o ato de o indivíduo declarar sua própria raça ou cor (preto, pardo, branco, amarelo ou indígena) para fins oficiais (IBGE, cotas), sendo um direito garantido.",
+                emoji: "👤",
+                colorClass: "bg-blue-600 hover:bg-blue-700"
+            },
+            {
+                topic: "Colorismo",
+                question: "O que é o fenômeno do Colorismo?",
+                answer: "Hierarquização de indivíduos negros conforme a tonalidade da pele, privilegiando tons mais claros e criando divisões internas no movimento negro.",
+                emoji: "🎨",
+                colorClass: "bg-orange-600 hover:bg-orange-700"
+            },
+            {
+                topic: "Negritude",
+                question: "O que significa o conceito de Negritude?",
+                answer: "Consciência e orgulho da identidade negra, valorizando a herança cultural africana e promovendo a auto-afirmação política e social.",
+                emoji: "✊🏿",
+                colorClass: "bg-stone-600 hover:bg-stone-700"
+            },
+            {
+                topic: "Bancas de Heteroidentificação",
+                question: "Qual a função das Bancas de Heteroidentificação?",
+                answer: "Garantir que o sistema de cotas seja utilizado por quem realmente se enquadra nos critérios raciais, combatendo a fraude na autodeclaração.",
+                emoji: "🧐",
+                colorClass: "bg-amber-600 hover:bg-amber-700"
+            },
+
+            // --- 3. Conceitos de Combate e Reparação (5 cards) ---
+            {
+                topic: "Reparação Histórica",
+                question: "Qual o objetivo da 'Reparação Histórica'?",
+                answer: "Busca corrigir e compensar os danos causados por séculos de escravidão e discriminação, através de políticas públicas como as cotas raciais e indenizações.",
+                emoji: "⚖️",
+                colorClass: "bg-yellow-600 hover:bg-yellow-700"
+            },
+            {
+                topic: "Pacto da Branquitude",
+                question: "O que é o 'Pacto da Branquitude'?",
+                answer: "Acordo implícito entre pessoas brancas para manter o status quo e os privilégios raciais, silenciando ou minimizando o racismo.",
+                emoji: "🤫",
+                colorClass: "bg-purple-600 hover:bg-purple-700"
+            },
+            {
+                topic: "Lugar de Fala",
+                question: "O que significa 'Lugar de Fala'?",
+                answer: "Conceito que enfatiza que a experiência da opressão (racial, de gênero, etc.) confere a quem a vive a autoridade de narrá-la e teorizá-la.",
+                emoji: "🗣️",
+                colorClass: "bg-cyan-600 hover:bg-cyan-700"
+            },
+            {
+                topic: "Letramento Racial",
+                question: "O que é 'Letramento Racial'?",
+                answer: "Capacidade de ler, interpretar e criticar as dinâmicas raciais da sociedade, reconhecendo a própria posição e o funcionamento do racismo.",
+                emoji: "🧠",
+                colorClass: "bg-fuchsia-600 hover:bg-fuchsia-700"
+            },
+            {
+                topic: "Ações Afirmativas",
+                question: "Qual o propósito das Ações Afirmativas?",
+                answer: "Medidas temporárias e especiais para eliminar e prevenir a discriminação, acelerando a igualdade de participação em áreas onde grupos minoritários são sub-representados.",
+                emoji: "📈",
+                colorClass: "bg-violet-600 hover:bg-violet-700"
+            },
+            
+            // --- 4. Personalidades Negras Históricas (7 cards) ---
+            {
+                topic: "Carolina Maria de Jesus",
+                question: "Qual a importância da obra 'Quarto de Despejo'?",
+                answer: "Livro-diário que narra a dura vida na favela, sendo um dos mais importantes registros da Literatura de Denúncia Social no Brasil, escrito por uma mulher negra.",
+                emoji: "📖",
+                colorClass: "bg-gray-700 hover:bg-gray-800"
+            },
+            {
+                topic: "Luiza Mahin",
+                question: "Quem foi Luiza Mahin?",
+                answer: "Líder de revoltas de escravizados na Bahia, como a Revolta dos Malês (1835), e mãe do abolicionista Luiz Gama. Símbolo de resistência.",
+                emoji: "🇧🇷",
+                colorClass: "bg-red-700 hover:bg-red-800"
+            },
+            {
+                topic: "Maria Felipa de Oliveira",
+                question: "Qual o seu papel na Independência do Brasil?",
+                answer: "Heroína da Independência na Ilha de Itaparica, liderou um grupo de mulheres negras e indígenas que lutou contra as tropas portuguesas invasoras.",
+                emoji: "⚔️",
+                colorClass: "bg-cyan-700 hover:bg-cyan-800"
+            },
+            {
+                topic: "Ganga Zumba",
+                question: "Ganga Zumba é conhecido por qual feito?",
+                answer: "Foi o primeiro líder do Quilombo dos Palmares, o maior e mais famoso quilombo do período colonial brasileiro.",
+                emoji: "👑",
+                colorClass: "bg-orange-700 hover:bg-orange-800"
+            },
+            {
+                topic: "Abdias Nascimento",
+                question: "Em qual área Abdias Nascimento se destacou?",
+                answer: "Ativista, poeta, dramaturgo e político, um dos maiores defensores do pan-africanismo e da cultura negra no Brasil e fundador do Teatro Experimental do Negro (TEN).",
+                emoji: "🎭",
+                colorClass: "bg-indigo-700 hover:bg-indigo-800"
+            },
+            {
+                topic: "Milton Santos",
+                question: "Qual sua contribuição acadêmica?",
+                answer: "Um dos maiores geógrafos brasileiros, conhecido por sua crítica à globalização e por desenvolver o conceito do 'Meio Técnico-Científico-Informacional'.",
+                emoji: "🗺️",
+                colorClass: "bg-teal-700 hover:bg-teal-800"
+            },
+            {
+                topic: "Dandara dos Palmares",
+                question: "Qual seu legado de resistência?",
+                answer: "Guerreira do Quilombo dos Palmares, companheira de Zumbi, conhecida por sua luta pela liberdade e por não aceitar acordos de paz com o governo colonial.",
+                emoji: "🛡️",
+                colorClass: "bg-pink-700 hover:bg-pink-800"
+            },
+
+            // --- 5. Personalidades Negras da Atualidade (8 cards) ---
+            {
+                topic: "Djamila Ribeiro",
+                question: "Qual sua principal área de atuação na filosofia?",
+                answer: "Filósofa, ativista e feminista negra, autora de livros influentes como 'Pequeno Manual Antirracista', que populariza conceitos do feminismo negro.",
+                emoji: "💡",
+                colorClass: "bg-gray-600 hover:bg-gray-700"
+            },
+            {
+                topic: "Taís Araújo",
+                question: "Qual barreira ela quebrou na TV brasileira?",
+                answer: "Foi a primeira atriz negra a protagonizar uma novela na Rede Globo, 'Xica da Silva' (na Manchete) e 'Da Cor do Pecado' (na Globo), abrindo caminhos para outras atrizes.",
+                emoji: "📺",
+                colorClass: "bg-purple-700 hover:bg-purple-800"
+            },
+            {
+                topic: "Conceição Evaristo",
+                question: "Qual conceito literário ela criou?",
+                answer: "Criou o conceito de 'escrevivência', que une a experiência de vida (vivência) à escrita, transformando a memória e a história negra em literatura.",
+                emoji: "🖊️",
+                colorClass: "bg-yellow-700 hover:bg-yellow-800"
+            },
+            {
+                topic: "Lázaro Ramos",
+                question: "Além de ator, qual o seu papel social?",
+                answer: "Ator, diretor, escritor e apresentador, conhecido por seus trabalhos que abordam a questão racial e por projetos educativos e de incentivo à leitura para crianças.",
+                emoji: "🎬",
+                colorClass: "bg-blue-700 hover:bg-blue-800"
+            },
+            {
+                topic: "Erika Hilton",
+                question: "Qual seu marco na política brasileira?",
+                answer: "É a primeira mulher negra e trans a ser eleita deputada federal por São Paulo, representando um avanço na diversidade do Congresso Nacional.",
+                emoji: "🏳️‍⚧️",
+                colorClass: "bg-green-700 hover:bg-green-800"
+            },
+            {
+                topic: "Aza Njeri",
+                question: "Em que área Aza Njeri se destaca?",
+                answer: "Filósofa, escritora e pesquisadora brasileira especializada em pensamento africano, feminismo e a diáspora, com atuação forte nas redes sociais e acadêmica.",
+                emoji: "🎓",
+                colorClass: "bg-lime-700 hover:bg-lime-800"
+            },
+            {
+                topic: "Gilberto Gil",
+                question: "Qual a sua relevância cultural e política?",
+                answer: "Músico, cantor, compositor e ex-Ministro da Cultura. Um dos fundadores do Tropicalismo e ícone da música popular brasileira.",
+                emoji: "🎸",
+                colorClass: "bg-fuchsia-700 hover:bg-fuchsia-800"
+            },
+            {
+                topic: "Sueli Carneiro",
+                question: "Qual sua principal contribuição para o ativismo negro?",
+                answer: "Filósofa e ativista, fundadora do Geledés - Instituto da Mulher Negra, uma das referências mais importantes do feminismo negro no Brasil.",
+                emoji: "🧩",
+                colorClass: "bg-rose-600 hover:bg-rose-700"
+            },
+        ];
+
+        const grid = document.getElementById('flashcards-grid');
+
+        /**
+         * Cria e insere o HTML para um único cartão.
+         * @param {Object} card - Objeto com os dados do cartão.
+         * @returns {void}
+         */
+        function createFlashcard(card) {
+            const cardElement = document.createElement('div');
+            cardElement.className = 'flashcard-container';
+            
+            // Gera um ID limpo e a cor base para os estilos
+            const topicId = card.topic.replace(/\s/g, '-').replace(/[^\w-]/g, ''); 
+            const colorBaseMatch = card.colorClass.match(/bg-([a-z]+)-\d{3}/);
+            const colorBase = colorBaseMatch ? colorBaseMatch[1] : 'blue';
+
+            cardElement.innerHTML = `
+                <div class="flashcard-inner transition duration-500 ease-in-out">
+                    <!-- Frente do Cartão (Pergunta) -->
+                    <div class="flashcard-front ${card.colorClass} shadow-xl">
+                        <div class="icon-size mb-4">${card.emoji}</div>
+                        <h2 class="text-xl font-bold mb-2">${card.topic}</h2>
+                        <p class="text-base font-semibold px-4">${card.question}</p>
+                        <span class="absolute bottom-4 text-xs opacity-75">Clique para ver a resposta</span>
+                    </div>
+
+                    <!-- Verso do Cartão (Resposta e Funcionalidade Gemini) -->
+                    <div class="flashcard-back ${card.colorClass} shadow-xl text-left">
+                        <h3 class="text-lg font-bold mb-3 w-full border-b pb-2">Resposta: ${card.topic}</h3>
+                        <p class="text-sm sm:text-base mb-4">${card.answer}</p>
+                        
+                        <!-- Botões de IA -->
+                        <div class="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-2 w-full justify-center mb-2">
+                            <!-- Botão 1: Exemplo Prático -->
+                            <button id="gemini-btn-example-${topicId}" 
+                                    class="generate-example-btn flex-grow bg-white text-${colorBase}-600 font-bold py-2 px-3 rounded-full shadow-lg transition duration-300 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 text-xs sm:text-sm"
+                                    data-topic="${card.topic}"
+                                    data-answer="${card.answer}">
+                                Gerar Exemplo Prático ✨
+                            </button>
+                            <!-- Botão 2: Pergunta para Discussão -->
+                            <button id="gemini-btn-discussion-${topicId}" 
+                                    class="generate-discussion-btn flex-grow bg-white text-${colorBase}-600 font-bold py-2 px-3 rounded-full shadow-lg transition duration-300 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-white focus:ring-opacity-50 text-xs sm:text-sm"
+                                    data-topic="${card.topic}"
+                                    data-answer="${card.answer}">
+                                Pergunta para Discussão ✨
+                            </button>
+                        </div>
+
+                        <!-- Output 1: Exemplo Prático -->
+                        <div id="gemini-output-example-${topicId}" class="mt-2 p-3 bg-white bg-opacity-10 rounded-lg w-full text-xs sm:text-sm text-white gemini-output-box" style="min-height: 25px;">
+                            <!-- O exemplo gerado aparecerá aqui -->
+                        </div>
+                        
+                        <!-- Output 2: Pergunta para Discussão -->
+                        <div id="gemini-output-discussion-${topicId}" class="mt-2 p-3 bg-white bg-opacity-10 rounded-lg w-full text-xs sm:text-sm text-white gemini-output-box" style="min-height: 25px;">
+                            <!-- A pergunta de discussão aparecerá aqui -->
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            // Adiciona o evento de clique para virar o cartão
+            cardElement.addEventListener('click', (e) => {
+                // Previne que o clique nos botões de IA vire o cartão
+                if (!e.target.classList.contains('generate-example-btn') && !e.target.classList.contains('generate-discussion-btn')) {
+                    const inner = cardElement.querySelector('.flashcard-inner');
+                    inner.classList.toggle('is-flipped');
+                }
+            });
+
+            // --- Event Listener para Gerar Exemplo Prático ---
+            const generateExampleButton = cardElement.querySelector('.generate-example-btn');
+            const outputExampleDiv = cardElement.querySelector(`#gemini-output-example-${topicId}`);
+            
+            generateExampleButton.addEventListener('click', async () => {
+                const topic = generateExampleButton.getAttribute('data-topic');
+                const answer = generateExampleButton.getAttribute('data-answer');
+                
+                outputExampleDiv.innerHTML = 'A processar... Por favor, aguarde. ⏳';
+                generateExampleButton.disabled = true;
+                generateExampleButton.classList.add('opacity-50');
+
+                const example = await generateExample(topic, answer);
+
+                outputExampleDiv.innerHTML = `<span class="font-bold">Exemplo Gerado:</span> ${example}`;
+                generateExampleButton.disabled = false;
+                generateExampleButton.classList.remove('opacity-50');
+            });
+
+            // --- Event Listener para Gerar Pergunta para Discussão ---
+            const generateDiscussionButton = cardElement.querySelector('.generate-discussion-btn');
+            const outputDiscussionDiv = cardElement.querySelector(`#gemini-output-discussion-${topicId}`);
+
+            generateDiscussionButton.addEventListener('click', async () => {
+                const topic = generateDiscussionButton.getAttribute('data-topic');
+                const answer = generateDiscussionButton.getAttribute('data-answer');
+                
+                outputDiscussionDiv.innerHTML = 'A processar... Por favor, aguarde. ⏳';
+                generateDiscussionButton.disabled = true;
+                generateDiscussionButton.classList.add('opacity-50');
+
+                const question = await generateDiscussionQuestion(topic, answer);
+
+                outputDiscussionDiv.innerHTML = `<span class="font-bold">Pergunta Gerada:</span> ${question}`;
+                generateDiscussionButton.disabled = false;
+                generateDiscussionButton.classList.remove('opacity-50');
+            });
+
+            grid.appendChild(cardElement);
+        }
+
+        // Gera todos os cartões na inicialização
+        flashcardsData.forEach(createFlashcard);
+    </script>
+</body>
+</html>
